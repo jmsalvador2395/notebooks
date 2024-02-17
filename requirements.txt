@@ -5,3 +5,9 @@ transformers
 tokenizers
 numpy
 datasets
+pillow
+matplotlib
+tqdm
+pandas
+scipy
+jupyterlab-vim
