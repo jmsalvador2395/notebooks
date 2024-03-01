@@ -16,3 +16,6 @@ nltk
 mteb
 mteb[beir]
 umap-learn
+evaluate
+rouge-score
+bert_score
