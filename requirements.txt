@@ -11,3 +11,8 @@ tqdm
 pandas
 scipy
 jupyterlab-vim
+sentence-transformers
+nltk
+mteb
+mteb[beir]
+umap-learn
