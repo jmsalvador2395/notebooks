@@ -4,3 +4,4 @@ env/
 Untitled*.ipynb
 results/
 data/
+*.egg-info
