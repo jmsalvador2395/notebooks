@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 
 # local imports
-from mltoolkit.utils import files
+from . import files
 
 def file_explorer(prompt, start_path=None):
     """this displays a menu for finding and returning a desired file path

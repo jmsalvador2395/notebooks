@@ -4,4 +4,6 @@ env/
 Untitled*.ipynb
 results/
 data/
+__pycache__/
+*.pyc
 *.egg-info
