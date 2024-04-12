@@ -8,7 +8,6 @@ from typing import List, Dict, Tuple, Optional, Iterable, Callable, Any
 
 from . import display
 
-
 def get_dl_params(seed):
     """
     returns a seedworker and generator for initialize torch dataloaders.
@@ -78,51 +77,6 @@ def count_trainable_params(model: nn.Module) -> int:
     """
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
-def pad_and_stack(tensors:     Iterable[Tensor], 
-                  stack_dim:   int=0,
-                  pad_dim:     int=0,
-                  pad_value:   torch.dtype=0) -> Tensor:
-    """
-    pads a set of tensors along pad_dim using pad_value and then vertical stacks them along stack_dim
-
-    Input:
-    - tensors[Iterable[Tensor]]: a collection of tensors
-    - stack_dim[int]: the dimension to stack along
-    - pad_dim[int]: the dimension that you want to apply padding along (default: 0)
-    - pad_value: the value to pad with (default: 0)
-
-    Output:
-    - Tensor: a single torch tensor
-    """
-
-    # get maximum for padding dim
-    dim_size = max([t.shape[pad_dim] for t in tensors])
-    
-    # pad and add to out_tensors list
-    out_tensors = []
-    for t in tensors:
-        shape = list(t.shape)
-        pad_dim_size = dim_size - shape[pad_dim]
-        if pad_dim_size > 0:
-            shape[pad_dim] = dim_size - shape[pad_dim]
-            padding_tensor = torch.full(
-                shape,
-                pad_value,
-                dtype=t.dtype,
-                device=t.device,
-            )
-            out_tensors.append(torch.cat(
-                [t, padding_tensor], 
-                dim=pad_dim
-            ))
-        else:
-            out_tensors.append(t)
-
-    # stack
-    out_tensors = torch.cat(out_tensors, dim=stack_dim)
-
-    return out_tensors
-
 def get_dtype(dtype_str: str) -> torch.dtype:
     """
     takes in a string and returns the corresponding torch dtype
@@ -161,3 +115,92 @@ def freeze_module(mod: nn.Module) -> nn.Module:
         param.requires_grad=False
 
     return mod
+
+
+def pad(tensors: Tensor, pad_dim: int=0, pad_value: int=0):
+    """
+    pads a set of tensors along pad_dim using pad_value
+
+    Input:
+    - tensors[Iterable[Tensor]]: a collection of tensors
+    - pad_dim[int]: the dimension that you want to apply padding along 
+      (default: 0)
+    - pad_value: the value to pad with (default: 0)
+
+    Output:
+    - List[Tensor]: a list of tensors
+    """
+
+    # get maximum for padding dim
+    dim_size = max([t.shape[pad_dim] for t in tensors])
+    
+    # pad and add to out_tensors list
+    out_tensors = []
+    for t in tensors:
+        shape = list(t.shape)
+        pad_dim_size = dim_size - shape[pad_dim]
+        if pad_dim_size > 0:
+            shape[pad_dim] = dim_size - shape[pad_dim]
+            padding_tensor = torch.full(
+                shape,
+                pad_value,
+                dtype=t.dtype,
+                device=t.device,
+            )
+            out_tensors.append(torch.cat(
+                [t, padding_tensor], 
+                dim=pad_dim
+            ))
+        else:
+            out_tensors.append(t)
+
+    return out_tensors
+
+def pad_and_cat(
+        tensors: Iterable[Tensor], 
+        cat_dim: int=0,
+        pad_dim: int=0,
+        pad_value: torch.dtype=0) -> Tensor:
+    """
+    pads a set of tensors along pad_dim using pad_value and then 
+    vertical stacks them along stack_dim
+
+    Input:
+    - tensors[Iterable[Tensor]]: a collection of tensors
+    - stack_dim[int]: the dimension to stack along
+    - pad_dim[int]: the dimension that you want to apply padding along 
+      (default: 0)
+    - pad_value: the value to pad with (default: 0)
+
+    Output:
+    - Tensor: a single torch tensor
+    """
+
+    out_tensors = pad(tensors, pad_dim=pad_dim, pad_value=pad_value)
+    out_tensors = torch.cat(out_tensors, dim=cat_dim)
+
+    return out_tensors
+
+def pad_and_stack(
+        tensors: Iterable[Tensor], 
+        stack_dim: int=0,
+        pad_dim: int=0,
+        pad_value: torch.dtype=0) -> Tensor:
+    """
+    pads a set of tensors along pad_dim using pad_value and then 
+    vertical stacks them along stack_dim
+
+    Input:
+    - tensors[Iterable[Tensor]]: a collection of tensors
+    - pad_dim[int]: the dimension that you want to apply padding along 
+      (default: 0)
+    - pad_value: the value to pad with (default: 0)
+
+    Output:
+    - Tensor: a single torch tensor
+    """
+
+    out_tensors = pad(tensors, pad_dim=pad_dim, pad_value=pad_value)
+    out_tensors = torch.stack(out_tensors, dim=stack_dim)
+
+    return out_tensors
