@@ -1,3 +1,4 @@
+accelerate
 jupyterlab
 ipython
 torch
@@ -19,8 +20,8 @@ umap-learn
 evaluate
 rouge-score
 bert_score
-accelerate
-langchain
-vllm
 colorama
 simple_term_menu
+langchain
+vllm
+ipywidgets

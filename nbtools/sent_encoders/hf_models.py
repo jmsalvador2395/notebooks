@@ -3,11 +3,12 @@ import numpy as np
 from sentence_transformers import SentenceTransformer
 from sentence_transformers.models import Transformer, Pooling
 
-def from_hf(model_name: str,
-                   emb_dim: int, 
-                   max_seq_len: int,
-                   pooling_mode: str='mean',
-                   cache_dir: str=None) -> SentenceTransformer:
+def from_hf(
+        model_name: str,
+        emb_dim: int, 
+        max_seq_len: int,
+        pooling_mode: str='mean',
+        cache_dir: str=None) -> SentenceTransformer:
     """
     builds a SentenceTransformer model from a huggingface model name and other args
 
