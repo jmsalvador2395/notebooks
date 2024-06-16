@@ -25,3 +25,4 @@ simple_term_menu
 langchain
 vllm
 ipywidgets
+openpyxl
