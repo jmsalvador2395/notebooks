@@ -1,0 +1,35 @@
+#!/usr/bin/env python
+
+import json
+import datasets
+import numpy as np
+import pandas as pd
+import sqlite3
+
+from scipy.stats import kendalltau
+from datasets import load_dataset, Dataset
+from evaluate import load
+from tqdm import tqdm
+from transformers import logging
+from IPython.terminal.embed import InteractiveShellEmbed
+
+logging.set_verbosity_error()
+
+# Local
+from nbtools.utils import files
+
+fname = '/data/john/datasets/model_annotations.aligned.paired.jsonl'
+summeval = Dataset.from_pandas(pd.read_json(fname, lines=True))
+
+print(summeval)
+
+rose_scores = {}
+semncg = {}
+semf1 = {}
+
+sf1_met = load("nbansal/semf1")
+sncg_met = load("nbansal/semncg")
+
+ipshell = InteractiveShellEmbed()                                   
+ipshell()
+

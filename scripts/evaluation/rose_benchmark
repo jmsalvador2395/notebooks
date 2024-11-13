@@ -1,0 +1,148 @@
+#!/usr/bin/env python
+
+import json
+import datasets
+import numpy as np
+import pandas as pd
+import sqlite3
+
+from scipy.stats import kendalltau, pearsonr, spearmanr
+from datasets import load_dataset, Dataset
+from evaluate import load
+from tqdm import tqdm
+from transformers import logging
+from tabulate import tabulate
+from IPython.terminal.embed import InteractiveShellEmbed
+
+logging.set_verbosity_error()
+
+# Local
+from nbtools.utils import files
+
+cnndm_test = load_dataset("Salesforce/rose", "cnndm_test")["data"]
+cnndm_val = load_dataset("Salesforce/rose", "cnndm_validation")["data"]
+xsum = load_dataset("Salesforce/rose", "xsum")["data"]
+samsum = load_dataset("Salesforce/rose", "samsum")["data"]
+cnndm_protocol = load_dataset("Salesforce/rose", "cnndm_protocol")["data"]
+cnndm_protocol_gpt3 = load_dataset("Salesforce/rose", "cnndm_protocol_gpt3")["data"]
+
+rose = {
+    'xsum': xsum,
+    'samsum': samsum,
+#    'cnndm_test': cnndm_test,
+#    'cnndm_validation': cnndm_val,
+#    'cnndm_protocol': cnndm_protocol,
+#    'cnndm_protocol_gpt3': cnndm_protocol_gpt3,
+}
+
+fname = '/data/john/datasets/model_annotations.aligned.paired.jsonl'
+summeval = Dataset.from_pandas(pd.read_json(fname, lines=True))
+
+#print(rose)
+#print(summeval)
+
+rose_scores = {}
+semncg = {}
+semf1 = {}
+
+# load metrics
+model = 'microsoft/deberta-v3-large'
+print(f'using model: {model}')
+sf1_met = load("nbansal/semf1", model_type=model)
+sncg_met = load("nbansal/semncg", model_name=model)
+
+for ds_name, ds in tqdm(list(rose.items()), position=0):
+    sncg_scores = []
+    sf1_scores = []
+    acu_scores = []
+    for sample in tqdm(ds, position=1, leave=False):
+        src, ref = sample['source'], sample['reference']
+        preds = []
+        acu_sc = []
+        for sys in sample['annotations'].keys():
+            if sys == 'reference':
+                preds.append(sample['reference'])
+            else:
+                preds.append(sample['system_outputs'][sys])
+            acu_sc.append(
+                sample['annotations'][sys]['normalized_acu']
+            )
+        acu_scores.append(acu_sc)
+            
+        N = len(preds)
+        sncg_scores.append(sncg_met.compute(
+            predictions=preds, references=[ref]*N, documents=[src]*N,
+            verbose=False)[-1]
+        )
+        sf1_scores.append([
+            sc.f1 for sc in sf1_met.compute(
+                predictions=preds,
+                references=[ref]*N,
+            )
+        ])
+    rose_scores[ds_name] = acu_scores
+    semf1[ds_name] = sf1_scores
+    semncg[ds_name] = sncg_scores
+
+
+# Compute Correlation Scores
+keys = list(rose_scores.keys())
+a = np.array(rose_scores[keys[0]])
+b = np.array(semf1[keys[0]])
+C = {'semncg': dict(), 'semf1': dict()}
+results = []
+for key in keys:
+    row = {'dataset': key}
+    rs = np.array(rose_scores[key])
+    sncg = np.array(semncg[key])
+    sf1 = np.array(semf1[key])
+
+    # pearsonr
+    row['semf1-sum-r'] = np.mean(np.nan_to_num(
+        pearsonr(rs, sf1, axis=1).statistic
+    ))
+    row['semncg-sum-r'] = np.mean(np.nan_to_num(
+        pearsonr(rs, sncg, axis=1).statistic
+    ))
+    row['semf1-sys-r'] = pearsonr(
+        np.mean(rs, axis=0), 
+        np.mean(sf1, axis=0)).statistic
+    row['semncg-sys-r'] = pearsonr(
+        np.mean(rs, axis=0), 
+        np.mean(sncg, axis=0)).statistic
+
+    # spearmanr
+    row['semf1-sum-p'] = np.mean(np.nan_to_num(
+        spearmanr(rs, sf1, axis=1).statistic
+    ))
+    row['semncg-sum-p'] = np.mean(np.nan_to_num(
+        spearmanr(rs, sncg, axis=1).statistic
+    ))
+    row['semf1-sys-p'] = spearmanr(
+        np.mean(rs, axis=0), 
+        np.mean(sf1, axis=0)).statistic
+    row['semncg-sys-p'] = spearmanr(
+        np.mean(rs, axis=0), 
+        np.mean(sncg, axis=0)).statistic
+
+    # kendalltau
+    row['semf1-sum-t'] = np.mean(np.nan_to_num(np.array([
+        kendalltau(a, b).statistic for a, b in zip(rs, sf1)
+    ])))
+    row['semncg-sum-t'] = np.mean(np.nan_to_num(np.array([
+        kendalltau(a, b).statistic for a, b in zip(rs, sf1)
+    ])))
+    row['semf1-sys-t'] = kendalltau(
+        np.mean(rs, axis=0), 
+        np.mean(sf1, axis=0)).statistic
+    row['semncg-sys-t'] = kendalltau(
+        np.mean(rs, axis=0), 
+        np.mean(sncg, axis=0)).statistic
+
+    results.append(row)
+
+print(tabulate(results, headers='keys'))
+
+ipshell = InteractiveShellEmbed()                                   
+ipshell()
+
