@@ -26,3 +26,15 @@ langchain
 vllm
 ipywidgets
 openpyxl
+einops
+py7zr
+openai
+sacrebleu
+moverscore
+pyemd
+tf-keras
+pycocoevalcap
+pot
+spacy
+gensim
+pathos

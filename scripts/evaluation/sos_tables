@@ -1,0 +1,217 @@
+#!/usr/bin/env python
+import numpy as np
+import datasets
+import pandas as pd
+import sqlite3
+from tabulate import tabulate
+from itertools import product
+from datasets import Dataset, DatasetDict, concatenate_datasets
+from tqdm import tqdm
+from pprint import pprint
+from collections import OrderedDict
+from IPython.terminal.embed import InteractiveShellEmbed
+
+from nbtools.utils import files, strings
+
+
+
+def main():
+    datasets.disable_caching()
+    cache_dir = '/data/john/cache'
+    proot = files.project_root()
+
+    all_data = Dataset.from_json(f"{files.project_root()}/data/all_scores_addon.json")
+    print(all_data)
+
+
+    keys = [
+        'id', 'template', 'dataset', 'system', 'prompt', 'response', 
+        'index', 'semf1-use', 'semf1-distil', 'semf1-rob', 'bertscore', 'hashcode', 'model', 
+        'sys_text_id', 'prompt_text_id', 'bleu', 'ter', 'meteor', 'chrf', 
+        'bleurt', 'sms', 'moverscore', 'rouge1', 'rouge2', 'rougeL', 'rougeLsum', 
+    ]
+
+    cols = [
+        'id', 'template', 'dataset', 'system', 'prompt', 'response', 'idx',
+        'semf1_use', 'semf1_distil', 'semf1_rob', 'bertscore', 'hashcode', 
+        'model', 'sys_text_id', 'prompt_text_id', 'bleu', 'ter', 'meteor', 
+        'chrf', 'bleurt', 'sms', 'moverscore', 'rouge1', 'rouge2', 'rougeL', 
+        'rougeLsum', 
+    ]
+
+    con = sqlite3.connect(':memory:')
+    cur = con.cursor()
+
+    cur.execute(
+        """
+        CREATE TABLE data (
+            id int,
+            template text,
+            dataset text,
+            system text,
+            prompt text,
+            response text,
+            idx int,
+            semf1_use double,
+            semf1_distil double,
+            semf1_rob double,
+            bertscore double,
+            hashcode text,
+            model text,
+            sys_text_id int,
+            prompt_text_id int,
+            bleu double,
+            ter double,
+            meteor double,
+            chrf double,
+            bleurt double,
+            sms double,
+            moverscore double,
+            rouge1 double,
+            rouge2 double,
+            rougeL double,
+            rougeLsum double
+        )
+        """
+    )
+
+
+    dzip = zip(*[all_data[key] for key in keys])
+    cur.executemany(
+        """
+        INSERT INTO data VALUES
+        (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        dzip,
+    )
+
+    avgs_tbl, avgs_str = compute_averages(cur)
+    bests_tbl, bests_str = compute_bests(cur)
+
+    Dataset.from_list(avgs_tbl).to_json(
+        f"{files.project_root()}/data/avgs_tbl.json"
+    )
+    Dataset.from_list(bests_tbl).to_json(
+        f"{files.project_root()}/data/bests_tbl.json"
+    )
+
+    ipshell = InteractiveShellEmbed()
+    ipshell()
+
+def compute_bests(cur):
+    models, = zip(*cur.execute(f'SELECT DISTINCT(model) FROM data'))
+    templates, = zip(*cur.execute(f'SELECT DISTINCT(template) FROM data'))
+    ds_names, = zip(*cur.execute(f'SELECT DISTINCT(dataset) FROM data'))
+    metrics = [
+        'rougeLsum', 'rougeL', 'rouge1', 'rouge2', 'bleu', 'meteor', 'chrf', 
+        'ter', 'semf1_distil', 'bertscore', 'bleurt', 'moverscore', 'sms', 
+    ]
+    avg_score_tbl = []
+    for met in tqdm(metrics, position=0):
+        for model in tqdm(models, position=1, leave=False):
+            for ds_name in tqdm(ds_names, position=2, leave=False):
+                avgs = []
+                template_candidates = []
+                for template in tqdm(templates, position=3, leave=False):
+                    tids, = zip(*cur.execute(
+                        f"""
+                        SELECT DISTINCT(prompt_text_id) FROM data
+                        WHERE 
+                            dataset="{ds_name}"
+                            AND template="{template}"
+                        """
+                    ))
+                    sids, = zip(*cur.execute(
+                        f"""
+                        SELECT DISTINCT(sys_text_id) FROM data
+                        WHERE 
+                            dataset="{ds_name}"
+                            AND template="{template}"
+                        """
+                    ))
+                    for tid, sid in product(tids, sids):
+                        sc, = zip(*cur.execute(
+                            f"""
+                            SELECT {met} FROM data
+                            WHERE 
+                                model="{model}"
+                                AND template="{template}"
+                                AND dataset="{ds_name}"
+                                AND prompt_text_id={tid}
+                                AND sys_text_id={sid}
+                            """
+                        ))
+                        fill_val = 0 if met != 'ter' else max(sc)
+                        sc = [score if score else fill_val for score in sc]
+                        avgs.append(np.mean(np.array(sc)))
+                        template_candidates.append(template)
+                avgs = np.array(avgs)
+                if met != 'ter':
+                    best_avg = np.max(avgs)
+                    best_tmplt = template_candidates[np.argmax(avgs)]
+                else:
+                    best_avg = np.min(avgs)
+                    best_tmplt = template_candidates[np.argmin(avgs)]
+                avg_score_tbl.append(OrderedDict([
+                    ('dataset', ds_name),
+                    ('model', model),
+                    ('metric', met),
+                    ('average score', best_avg),
+                    ('template', best_tmplt),
+                ]))
+    def priority_sort_key(d):
+        priority = ['dataset', 'model', 'metric', 'average score', 'template']
+        for key in priority:
+            if key in d:
+                return d[key]
+        return float('inf')  # fallback if none of the keys are present
+    sorted_data = sorted(avg_score_tbl, key=priority_sort_key)
+
+    tbl_str = tabulate(sorted_data, headers='keys')
+    print(tbl_str)
+
+    return sorted_data, tbl_str
+
+def compute_averages(cur):
+    models, = zip(*cur.execute(f'SELECT DISTINCT(model) FROM data'))
+    templates, = zip(*cur.execute(f'SELECT DISTINCT(template) FROM data'))
+    ds_names, = zip(*cur.execute(f'SELECT DISTINCT(dataset) FROM data'))
+    metrics = [
+        'rougeLsum', 'rougeL', 'rouge1', 'rouge2', 'bleu', 'meteor', 'chrf', 
+        'ter', 'semf1_distil', 'bertscore', 'bleurt', 'moverscore', 'sms', 
+    ]
+    coarse_avgs= []
+    for met in tqdm(metrics, position=0):
+        for template in tqdm(templates, position=1, leave=False):
+            for ds_name in tqdm(ds_names, position=2, leave=False):
+
+                scores, = zip(*cur.execute(
+                    f"""
+                    SELECT {met} FROM data
+                    WHERE 
+                        template=="{template}" 
+                        AND {met} IS NOT NULL
+                        AND dataset=="{ds_name}"
+                    """
+                ))
+                coarse_avgs.append(OrderedDict([
+                    ('dataset', ds_name),
+                    ('metric', met),
+                    ('template', template),
+                    ('score', np.mean(np.array(scores))),
+                ]))
+    def priority_sort_key(d):
+        priority = ['dataset', 'metric', 'template', 'score']
+        for key in priority:
+            if key in d:
+                return d[key]
+        return float('inf')  # fallback if none of the keys are present
+    coarse_data_sorted = sorted(coarse_avgs, key=priority_sort_key)
+
+    coarse_tbl_str = tabulate(coarse_data_sorted, headers='keys')
+    print(coarse_tbl_str)
+
+    return coarse_data_sorted, coarse_tbl_str
+
+if __name__ == '__main__':
+    main()

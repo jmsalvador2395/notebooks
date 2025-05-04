@@ -1,0 +1,441 @@
+#!/usr/bin/env python
+
+import json
+import datasets
+import numpy as np
+import pandas as pd
+import sqlite3
+import evaluate
+import os
+import argparse
+import re
+import time
+import spacy
+#os.environ['MOVERSCORE_MODEL'] = "albert-base-v2"
+import gensim.downloader as api
+from gensim.models import KeyedVectors
+from gensim.similarities import WmdSimilarity
+import nltk
+import multiprocessing
+from collections import defaultdict
+import torch
+import gc
+
+
+
+from joblib import Memory
+from functools import lru_cache
+from pathos.multiprocessing import ProcessingPool as Pool
+from pycocoevalcap.cider.cider import Cider
+from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
+from openai import OpenAI
+from argparse import ArgumentParser
+from scipy.stats import kendalltau, pearsonr, spearmanr
+from datasets import (
+    load_dataset, Dataset, concatenate_datasets, DatasetDict
+)
+from evaluate import load
+from tqdm import tqdm
+from tabulate import tabulate
+from IPython.terminal.embed import InteractiveShellEmbed
+from itertools import chain, product
+
+from transformers import logging, AutoTokenizer
+#from sentence_transformers import SentenceTransformer
+
+# COMMENT THIS CONTENT FOR CERTAIN ENVIRONMENTS
+#from summaqa import evaluate_corpus
+
+# uncomment this for moverscore
+#from moverscore_v2 import get_idf_dict, word_mover_score
+
+#logging.set_verbosity_error()
+
+# Local
+from nbtools.utils import files
+
+def main(args):
+    out_dir = f'{files.project_root()}/data'
+    pth = (
+        '/data/john/projects/llm_eval/data/results/'
+        '20240502-185939/all_scores.json'
+    )
+    out_pth = f'{out_dir}/all_scores_addon.json'
+
+    mets = [
+        'semf1-use', 'semf1-distil', 'semf1-rob', 'bertscore', 'rougeLsum',
+        'rougeL', 'rouge1', 'rouge2',
+    ]
+
+    if os.path.exists(out_pth):
+        print(f'loading data from {out_pth}')
+        ds = Dataset.from_json(out_pth)
+    else:
+        print(f'loading data from {pth}')
+        ds = Dataset.from_json(pth)
+
+    bad_model = 'meta-llama/Meta-Llama-3-8B-Instruct'
+    models = set(ds['model'])
+    if bad_model in models:
+        models.remove(bad_model)
+
+    ds = ds.filter(lambda x: x['model'] != bad_model)
+
+    print(f'computing metrics ...')
+    ds = ds.remove_columns(['rouge1', 'rouge2', 'rougeL', 'rougeLsum'])
+    ds = compute_more_metrics(ds, args.num_proc)
+    ds.to_json(out_pth)
+
+    ipshell = InteractiveShellEmbed()
+    ipshell()
+
+def compute_more_metrics(ds, num_proc):
+    out_ds = ds
+    allsides_dir = '/data/john/projects/llm_eval/data/ds/all_sides/test.json'
+    ppp_dir = '/data/john/projects/llm_eval/data/ds/privacy_policy/3p_data.csv'
+    ref_ds = DatasetDict({
+        'all_sides': Dataset.from_json(allsides_dir),
+        'privacy_policy': Dataset.from_csv(ppp_dir),
+    })
+    ref_cols = {
+        'all_sides': [
+            'Ahmed_Intersection',
+            'Naman_Intersection',
+            'Helen_Intersection',
+            'AllSides_Intersection'
+        ],
+        'privacy_policy': [
+            'Annotator1',
+            'Annotator2',
+            'Annotator3'
+        ],
+    }
+    ref_text = []
+    pred_text = []
+    data_pth = f'{files.project_root()}/cache/preds_refs.json'
+    if not os.path.exists(data_pth):
+        for sample in tqdm(ds, desc='getting references'):
+            name, sid = sample['dataset'], sample['id']
+            refs = [ref_ds[name][sid][col] for col in ref_cols[name]]
+            ref_text.append(refs)
+            pred_text.append([sample['response']]*len(refs))
+
+        lengths = [len(x) for x in ref_text]
+        ref_text_flat = list(chain(*ref_text))
+        ref_text_flat = [
+            text if text is not None else '' 
+            for text in tqdm(
+                ref_text_flat,
+                desc='building ref text',
+            )
+        ]
+        pred_text_flat = list(chain(*pred_text))
+        pred_text_flat = [
+            text if text is not None else '' 
+            for text in tqdm(
+                pred_text_flat,
+                desc='building pred text',
+            )
+        ]
+        data = {
+            'refs': ref_text_flat,
+            'preds': pred_text_flat,
+            'lengths': lengths,
+        }
+        with open(data_pth, 'w') as f:
+            f.write(json.dumps(data))
+    else:
+        print(f'loading data from {data_pth}')
+        with open(data_pth) as f:
+            data = json.load(f)
+        print(f'done')
+    pred_text_flat = data['preds']
+    ref_text_flat = data['refs']
+    lengths = np.array(data['lengths'])
+
+    keys = list(ds.features.keys())
+
+    # if 'cider' not in keys:
+    #     print(f'computing cider ...')
+    #     # N = len(pred_text_flat)
+    #     # ref_dict = {
+    #     #     n: [ref]
+    #     #     for n, ref in zip(range(N), ref_text_flat)
+    #     # }
+    #     # pred_dict = {
+    #     #     n: [ref]
+    #     #     for n, ref in zip(range(N), pred_text_flat)
+    #     # }
+    #     # cider_scorer = Cider()
+
+    #     # # Compute the CIDER score for all pairs
+    #     # _, scores = cider_scorer.compute_score(ref_dict, pred_dict)
+
+    #     cider_scorer = Cider()
+    #     def compute_cider(args):
+    #         ref, pred = args
+    #         ref_dict = {1: [ref]}
+    #         pred_dict = {1: [pred]}
+    #         _, score = cider_scorer.compute_score(ref_dict, pred_dict)
+    #         return score[0]
+
+    #     breakpoint()
+
+
+    #     scores = np.array(scores)
+    #     idx = np.cumsum(lengths)
+
+    #     scores_grouped = np.split(scores, idx)[:-1]
+    #     scores_max = [
+    #         np.max(sample_scores) if len(sample_scores) > 1 else 0
+    #         for sample_scores in scores_grouped
+    #     ]
+    #     out_ds = out_ds.add_column('cider', scores_max)
+    if 'rouge1' not in keys:
+        print(f'computing rouge')
+        critic = evaluate.load('rouge')
+        res = critic.compute(
+            predictions=pred_text_flat,
+            references=ref_text_flat,
+            use_aggregator=False,
+        )
+        score_dict = {
+            'rouge1': np.array(res['rouge1']),
+            'rouge2': np.array(res['rouge2']),
+            'rougeL': np.array(res['rougeL']),
+            'rougeLsum': np.array(res['rougeLsum']),
+        }
+        idx = np.cumsum(lengths)
+
+        for met, scores in score_dict.items():
+            scores_grouped = np.split(scores, idx)[:-1]
+            scores_max = [
+                np.max(sample_scores) if len(sample_scores) > 1 else 0
+                for sample_scores in scores_grouped
+            ]
+            out_ds = out_ds.add_column(met, scores_max)
+
+    if 'ter' not in keys:
+        critic = evaluate.load('ter')
+        def compute_ter(args):
+            ref, pred = args
+            return critic.compute(
+                predictions=[pred],
+                references=[ref],
+                case_sensitive=False,
+            )['score']
+        with Pool(processes=num_proc) as pool:
+            res = list(tqdm(
+                    pool.imap(
+                        compute_ter, zip(ref_text_flat, pred_text_flat)
+                    ),
+                    total=len(ref_text_flat),
+                    desc='computing ter',
+                )
+            )
+        scores = np.array(res)
+        idx = np.cumsum(lengths)
+
+        scores_grouped = np.split(scores, idx)[:-1]
+        scores_max = [
+            np.max(sample_scores) if len(sample_scores) > 1 else 0
+            for sample_scores in scores_grouped
+        ]
+        out_ds = out_ds.add_column('ter', scores_max)
+
+    if 'sms' not in keys:
+        print(f'computing sms ...')
+        word_vectors = api.load("word2vec-google-news-300")
+        scores = []
+        for ref, pred in tqdm(
+            zip(ref_text_flat, pred_text_flat),
+            total=len(ref_text_flat),
+            desc='computing sms',
+        ):
+            # Preprocess sentences (tokenization)
+            ref_tokens = nltk.word_tokenize(ref.lower())
+            pred_tokens = nltk.word_tokenize(pred.lower())
+
+            # Compute Word Mover's Distance (WMD)
+            distance = word_vectors.wmdistance(
+                ref_tokens, pred_tokens
+            )
+            similarity = 1 / (1 + distance)  # Convert to similarity score (range 0 to 1)
+            scores.append(similarity)
+
+        scores = np.array(scores)
+        idx = np.cumsum(lengths)
+
+        scores_grouped = np.split(scores, idx)[:-1]
+        scores_max = [
+            np.max(sample_scores) if len(sample_scores) > 1 else 0
+            for sample_scores in scores_grouped
+        ]
+        out_ds = out_ds.add_column('sms', scores_max)
+
+
+    # uncomment import to compute this
+    # if 'moverscore' not in keys:
+    #     print(f'generating idf dicts ...', end=' ')
+    #     memory = Memory(location='~/.cache/joblib', verbose=0)
+    #     @memory.cache
+    #     def get_idf_dicts(ref_text_flat, pred_text_flat):
+    #         idf_dict_ref = get_idf_dict(ref_text_flat)
+    #         idf_dict_pred = get_idf_dict(pred_text_flat)
+    #         return (idf_dict_ref, idf_dict_pred)
+
+    #     idf_dict_ref, idf_dict_pred = get_idf_dicts(
+    #         tuple(ref_text_flat), tuple(pred_text_flat)
+    #     )
+
+    #     print(f'done')
+    #     def batch_generator(data, batch_size):
+    #         """Yields batches from a list."""
+    #         for i in range(0, len(data), batch_size):
+    #             yield data[i:i + batch_size]
+
+    #     #Compute Mover's Score
+    #     batch_size = 150
+    #     gpu_batch = 150
+    #     res = []
+    #     N = len(ref_text_flat)
+    #     data = list(zip(ref_text_flat, pred_text_flat))
+    #     for ref_pred in tqdm(
+    #         batch_generator(data, batch_size),
+    #         total=len(range(0, N, batch_size)),
+    #         desc='computing moverscore',
+    #     ):
+    #         ref_batch, pred_batch = zip(*ref_pred)
+    #         res += word_mover_score(
+    #             ref_batch,
+    #             pred_batch,
+    #             idf_dict_ref, 
+    #             idf_dict_pred,
+    #             stop_words=[], 
+    #             n_gram=1, 
+    #             batch_size=gpu_batch,
+    #             remove_subwords=True,
+    #         )
+    #         torch.cuda.empty_cache()
+    #         gc.collect()
+
+    #     scores = np.array(res)
+    #     idx = np.cumsum(lengths)
+
+    #     scores_grouped = np.split(scores, idx)[:-1]
+    #     scores_max = [
+    #         np.max(sample_scores) if len(sample_scores) > 1 else 0
+    #         for sample_scores in scores_grouped
+    #     ]
+    #     out_ds = out_ds.add_column('moverscore', scores_max)
+    if 'bleu' not in keys:
+        #critic = evaluate.load('bleu')
+        print(f'evaluating bleu ...')
+        def compute_bleu(args):
+            ref, pred = args
+            smooth_fn = SmoothingFunction().method1  # Apply smoothing
+            return sentence_bleu(
+                ref, pred, smoothing_function=smooth_fn
+            )
+        with Pool(processes=num_proc) as pool:
+            res = list(tqdm(
+                    pool.imap(
+                        compute_bleu, zip(ref_text_flat, pred_text_flat)
+                    ),
+                    total=len(ref_text_flat),
+                )
+            )
+
+        scores = np.array(res)
+        idx = np.cumsum(lengths)
+
+        scores_grouped = np.split(scores, idx)[:-1]
+        scores_max = [
+            np.max(sample_scores) if len(sample_scores) > 1 else 0
+            for sample_scores in scores_grouped
+        ]
+        out_ds = out_ds.add_column('bleu', scores_max)
+    if 'meteor' not in keys:
+        critic = evaluate.load('meteor')
+        def compute_meteor(args):
+            ref, pred = args
+            return critic.compute(
+                predictions=[pred],
+                references=[ref],
+            )['meteor']
+        with Pool(processes=num_proc) as pool:
+            res = list(tqdm(
+                pool.imap(compute_meteor, 
+                    zip(ref_text_flat, pred_text_flat)
+                ),
+                total=len(ref_text_flat)
+            ))
+
+
+        scores = np.array(res)
+        idx = np.cumsum(lengths)
+
+        scores_grouped = np.split(scores, idx)[:-1]
+        scores_max = [
+            np.max(sample_scores) if len(sample_scores) > 1 else 0
+            for sample_scores in scores_grouped
+        ]
+        out_ds = out_ds.add_column('meteor', scores_max)
+    if 'chrf' not in keys:
+        critic = evaluate.load('chrf')
+
+        def compute_chrf(args):
+            ref, pred = args
+            score = critic.compute(
+                predictions=[pred], 
+                references=[ref]
+            )['score']
+            return score
+        with Pool(processes=num_proc) as pool:
+            res = list(tqdm(
+                pool.imap(
+                    compute_chrf,
+                    zip(ref_text_flat, pred_text_flat),
+                ),
+                total=len(ref_text_flat),
+                desc='computing chrf',
+            ))
+        scores = np.array(res)
+        idx = np.cumsum(lengths)
+
+        scores_grouped = np.split(scores, idx)[:-1]
+        scores_max = [
+            np.max(sample_scores) if len(sample_scores) > 1 else 0
+            for sample_scores in scores_grouped
+        ]
+        out_ds = out_ds.add_column('chrf', scores_max)
+
+    if 'bleurt' not in keys:
+        print(f'computing bleurt ...')
+        critic = evaluate.load('bleurt', module_type='metric')
+
+        res = critic.compute(
+            predictions=pred_text_flat, 
+            references=ref_text_flat
+        )
+        scores = np.array(res['scores'])
+        idx = np.cumsum(lengths)
+
+        scores_grouped = np.split(scores, idx)[:-1]
+        scores_max = [
+            np.max(sample_scores) if len(sample_scores) > 1 else 0
+            for sample_scores in scores_grouped
+        ]
+        out_ds = ds.add_column('bleurt', scores_max)
+
+    return out_ds
+
+
+if __name__ == '__main__':
+    parser = ArgumentParser()
+    parser.add_argument(
+        '-n', '--num_proc', default=32,
+        required=False, help='number of processes to use'
+    )
+    args = parser.parse_args()
+    main(args)

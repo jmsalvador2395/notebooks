@@ -7,7 +7,7 @@ import pandas as pd
 import sqlite3
 
 from scipy.stats import kendalltau, pearsonr, spearmanr
-from datasets import load_dataset, Dataset
+from datasets import load_dataset, Dataset, concatenate_datasets
 from evaluate import load
 from tqdm import tqdm
 from transformers import logging
@@ -27,8 +27,8 @@ cnndm_protocol = load_dataset("Salesforce/rose", "cnndm_protocol")["data"]
 cnndm_protocol_gpt3 = load_dataset("Salesforce/rose", "cnndm_protocol_gpt3")["data"]
 
 rose = {
-    'xsum': xsum,
     'samsum': samsum,
+    'xsum': xsum,
 #    'cnndm_test': cnndm_test,
 #    'cnndm_validation': cnndm_val,
 #    'cnndm_protocol': cnndm_protocol,
@@ -44,16 +44,20 @@ summeval = Dataset.from_pandas(pd.read_json(fname, lines=True))
 rose_scores = {}
 semncg = {}
 semf1 = {}
+rouge1 = {}
 
 # load metrics
-model = 'microsoft/deberta-v3-large'
+#model = 'ISOISS/jina-embeddings-v3-tei'
+model = 'FacebookAI/roberta-large'
 print(f'using model: {model}')
 sf1_met = load("nbansal/semf1", model_type=model)
 sncg_met = load("nbansal/semncg", model_name=model)
+rouge_met = load("rouge")
 
 for ds_name, ds in tqdm(list(rose.items()), position=0):
     sncg_scores = []
     sf1_scores = []
+    r1_scores = []
     acu_scores = []
     for sample in tqdm(ds, position=1, leave=False):
         src, ref = sample['source'], sample['reference']
@@ -80,9 +84,17 @@ for ds_name, ds in tqdm(list(rose.items()), position=0):
                 references=[ref]*N,
             )
         ])
+        r1_scores.append(
+            rouge_met.compute(
+                predictions=preds,
+                references=[ref]*N,
+                use_aggregator=False,
+            )['rouge1']
+        )
     rose_scores[ds_name] = acu_scores
     semf1[ds_name] = sf1_scores
     semncg[ds_name] = sncg_scores
+    rouge1[ds_name] = r1_scores
 
 
 # Compute Correlation Scores
@@ -94,50 +106,37 @@ results = []
 for key in keys:
     row = {'dataset': key}
     rs = np.array(rose_scores[key])
-    sncg = np.array(semncg[key])
-    sf1 = np.array(semf1[key])
+    dt = {
+        'sncg': np.array(semncg[key]),
+        'sf1': np.array(semf1[key]),
+        'r1': np.array(rouge1[key]),
+    }
 
-    # pearsonr
-    row['semf1-sum-r'] = np.mean(np.nan_to_num(
-        pearsonr(rs, sf1, axis=1).statistic
-    ))
-    row['semncg-sum-r'] = np.mean(np.nan_to_num(
-        pearsonr(rs, sncg, axis=1).statistic
-    ))
-    row['semf1-sys-r'] = pearsonr(
-        np.mean(rs, axis=0), 
-        np.mean(sf1, axis=0)).statistic
-    row['semncg-sys-r'] = pearsonr(
-        np.mean(rs, axis=0), 
-        np.mean(sncg, axis=0)).statistic
+    for m in dt:
+        # pearsonr
+        row[f'{m}-sum-r'] = np.mean(np.nan_to_num(
+            pearsonr(rs, dt[m], axis=1).statistic
+        ))
+        row[f'{m}-sys-r'] = pearsonr(
+            np.mean(rs, axis=0),
+            np.mean(dt[m], axis=0)
+        ).statistic
 
-    # spearmanr
-    row['semf1-sum-p'] = np.mean(np.nan_to_num(
-        spearmanr(rs, sf1, axis=1).statistic
-    ))
-    row['semncg-sum-p'] = np.mean(np.nan_to_num(
-        spearmanr(rs, sncg, axis=1).statistic
-    ))
-    row['semf1-sys-p'] = spearmanr(
-        np.mean(rs, axis=0), 
-        np.mean(sf1, axis=0)).statistic
-    row['semncg-sys-p'] = spearmanr(
-        np.mean(rs, axis=0), 
-        np.mean(sncg, axis=0)).statistic
-
-    # kendalltau
-    row['semf1-sum-t'] = np.mean(np.nan_to_num(np.array([
-        kendalltau(a, b).statistic for a, b in zip(rs, sf1)
-    ])))
-    row['semncg-sum-t'] = np.mean(np.nan_to_num(np.array([
-        kendalltau(a, b).statistic for a, b in zip(rs, sf1)
-    ])))
-    row['semf1-sys-t'] = kendalltau(
-        np.mean(rs, axis=0), 
-        np.mean(sf1, axis=0)).statistic
-    row['semncg-sys-t'] = kendalltau(
-        np.mean(rs, axis=0), 
-        np.mean(sncg, axis=0)).statistic
+        # spearmanr
+        row[f'{m}-sum-p'] = np.mean(np.nan_to_num(
+            spearmanr(rs, dt[m], axis=1).statistic
+        ))
+        row[f'{m}-sys-p'] = spearmanr(
+            np.mean(rs, axis=0), 
+            np.mean(dt[m], axis=0)
+        ).statistic
+        row[f'{m}-sum-t'] = np.mean(np.nan_to_num(np.array([
+            kendalltau(a, b).statistic for a, b in zip(rs, dt[m])
+        ])))
+        row['semncg-sys-t'] = kendalltau(
+            np.mean(rs, axis=0), 
+            np.mean(dt[m], axis=0)
+        ).statistic
 
     results.append(row)
 

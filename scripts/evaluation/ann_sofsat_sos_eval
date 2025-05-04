@@ -1,0 +1,505 @@
+#!/usr/bin/env python
+
+import json
+import datasets
+import numpy as np
+import pandas as pd
+import sqlite3
+import evaluate
+import os
+import argparse
+import re
+import time
+import spacy
+os.environ['MOVERSCORE_MODEL'] = "albert-base-v2"
+import gensim.downloader as api
+from gensim.models import KeyedVectors
+from gensim.similarities import WmdSimilarity
+import nltk
+
+
+from pycocoevalcap.cider.cider import Cider
+from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
+from openai import OpenAI
+from argparse import ArgumentParser
+from scipy.stats import kendalltau, pearsonr, spearmanr
+from datasets import (
+    load_dataset, Dataset, concatenate_datasets, DatasetDict
+)
+from evaluate import load
+from tqdm import tqdm
+from transformers import logging, AutoTokenizer
+from transformers import AutoTokenizer
+from tabulate import tabulate
+from IPython.terminal.embed import InteractiveShellEmbed
+from itertools import chain, product
+from sentence_transformers import SentenceTransformer
+
+# COMMENT THIS CONTENT FOR CERTAIN ENVIRONMENTS
+from summaqa import evaluate_corpus
+
+# uncomment this for moverscore
+#from moverscore_v2 import get_idf_dict, word_mover_score
+
+logging.set_verbosity_error()
+
+# Local
+from nbtools.utils import files
+
+def main(args):
+    pth = f'{files.project_root()}/data/annotation_samples_complete.xlsx'
+    out_pth = pth.replace('.xlsx', '_fixed.json')
+    out_dir = os.path.dirname(out_pth)
+    openai_model = 'gpt-4o'
+    open_ai_model_list = [
+        'gpt-4o', 'gpt-4o-mini',
+    ]
+    mets = [
+        'semf1-use', 'semf1-distil', 'semf1-rob', 'bertscore', 'rougeLsum',
+        'rougeL', 'rouge1', 'rouge2',
+    ]
+
+    if os.path.exists(out_pth):
+        ds = Dataset.from_json(out_pth)
+    else:
+        ds = Dataset.from_pandas(pd.read_excel(pth))
+
+    ds = compute_more_metrics(ds, openai_model=openai_model)
+    ds.to_json(out_pth)
+    breakpoint()
+
+    out_table = []
+    keys = list(ds.features.keys())
+    add_on_mets = [
+        'bleurt', 'bleu', 'meteor', 'chrf', 'moverscore', 'sms',
+        'ter', 'cider',
+    ]
+    """
+    for key in keys:
+        for oaim in open_ai_model_list:
+            if key.startswith(oaim):
+                add_on_mets.append(key)
+    """
+    mets += add_on_mets
+
+    cor_funcs = {
+        'kendall': kendalltau,
+        'spearman': spearmanr,
+        'pearson': pearsonr,
+    }
+
+    bad_model = 'meta-llama/Meta-Llama-3-8B-Instruct'
+    models = set(ds['model'])
+    if bad_model in models:
+        models.remove(bad_model)
+
+    #for mdl in models:
+    mdl_sets = {
+        mdl: ds.filter(lambda x: x['model'] == mdl) for mdl in models
+    }
+
+    ann_cols = [
+        'annotator_1', 'annotator_2', 
+        'annotator_3', 'annotator_agreement',
+    ]
+    # build matrix
+    ref_mats = {}
+    for ann in ann_cols:
+        ref_mats[ann] = np.array([
+            np.nan_to_num(np.array(data[ann], dtype=float))
+            for data in mdl_sets.values()
+        ]).T
+
+    for met in mets:
+        for ann in ann_cols:
+            ref = np.nan_to_num(np.array(ds[ann], dtype=float))
+            pred = np.nan_to_num(np.array(ds[met], dtype=float))
+
+            # compute aggregation metrics
+            pred_mat = np.array([
+                np.nan_to_num(np.array(data[met], dtype=float))
+                for data in mdl_sets.values()
+            ]).T
+            for fnc_name, cor_fnc in cor_funcs.items():
+                out_table.append({
+                    'metric': met,
+                    'function': fnc_name,
+                    'reduction': 'none',
+                    'annotator': ann,
+                    'score': cor_fnc(ref, pred).statistic,
+                })
+                out_table.append({
+                    'metric': met,
+                    'function': fnc_name,
+                    'reduction': 'summary',
+                    'annotator': ann,
+                    'score': np.mean([
+                        cor_fnc(X, Y).statistic 
+                        for X, Y in zip(ref_mats[ann], pred_mat)
+                    ]),
+                })
+                out_table.append({
+                    'metric': met,
+                    'function': fnc_name,
+                    'reduction': 'system',
+                    'annotator': ann,
+                    'score': cor_fnc(
+                        np.mean(ref_mats[ann], axis=0),
+                        np.mean(pred_mat, axis=0)).statistic
+                })
+
+    cor_ds = Dataset.from_list(out_table)
+    cor_ds.to_json(f'{out_dir}/correlation_data.json')
+    print(tabulate(out_table, headers='keys'))
+
+    ipshell = InteractiveShellEmbed()
+    ipshell()
+
+def compute_more_metrics(ds, openai_model='gpt-4o-mini'):
+    out_ds = ds
+    allsides_dir = '/data/john/projects/llm_eval/data/ds/all_sides/test.json'
+    ppp_dir = '/data/john/projects/llm_eval/data/ds/privacy_policy/3p_data.csv'
+    ref_ds = DatasetDict({
+        'all_sides': Dataset.from_json(allsides_dir),
+        'privacy_policy': Dataset.from_csv(ppp_dir),
+    })
+    ref_cols = {
+        'all_sides': [
+            'Ahmed_Intersection',
+            'Naman_Intersection',
+            'Helen_Intersection',
+            'AllSides_Intersection'
+        ],
+        'privacy_policy': [
+            'Annotator1',
+            'Annotator2',
+            'Annotator3'
+        ],
+    }
+    ref_text = []
+    pred_text = []
+    for sample in ds:
+        name, sid = sample['dataset'], sample['id']
+        refs = [ref_ds[name][sid][col] for col in ref_cols[name]]
+        ref_text.append(refs)
+        pred_text.append([sample['response']]*len(refs))
+
+    lengths = np.array([len(x) for x in ref_text])
+    ref_text_flat = list(chain(*ref_text))
+    ref_text_flat = [
+        text if text is not None else '' for text in ref_text_flat
+    ]
+    pred_text_flat = list(chain(*pred_text))
+    pred_text_flat = [
+        text if text is not None else '' for text in  pred_text_flat
+    ]
+
+    keys = list(ds.features.keys())
+    if 'cider' not in keys:
+        N = len(pred_text_flat)
+        ref_dict = {
+            n: [ref]
+            for n, ref in zip(range(N), ref_text_flat)
+        }
+        pred_dict = {
+            n: [ref]
+            for n, ref in zip(range(N), pred_text_flat)
+        }
+        cider_scorer = Cider()
+
+        # Compute the CIDER score for all pairs
+        _, scores = cider_scorer.compute_score(ref_dict, pred_dict)
+        scores = np.array(scores)
+        idx = np.cumsum(lengths)
+
+        scores_grouped = np.split(scores, idx)[:-1]
+        scores_max = [
+            np.max(sample_scores) if len(sample_scores) > 1 else 0
+            for sample_scores in scores_grouped
+        ]
+        out_ds = out_ds.add_column('cider', scores_max)
+    if 'ter' not in keys:
+        critic = evaluate.load('ter')
+        scores = np.array([
+            critic.compute(
+                predictions=[pred],
+                references=[ref],
+                case_sensitive=False,
+            )['score']
+            for pred, ref in zip(pred_text_flat, ref_text_flat)
+        ])
+
+        idx = np.cumsum(lengths)
+
+        scores_grouped = np.split(scores, idx)[:-1]
+        scores_max = [
+            np.max(sample_scores) if len(sample_scores) > 1 else 0
+            for sample_scores in scores_grouped
+        ]
+        out_ds = out_ds.add_column('ter', scores_max)
+
+    if 'sms' not in keys:
+        word_vectors = api.load("word2vec-google-news-300")
+        scores = []
+        for ref, pred in tqdm(
+            zip(ref_text_flat, pred_text_flat),
+            total=len(ref_text_flat),
+            desc='computing sms',
+        ):
+            # Preprocess sentences (tokenization)
+            ref_tokens = nltk.word_tokenize(ref.lower())
+            pred_tokens = nltk.word_tokenize(pred.lower())
+
+            # Compute Word Mover's Distance (WMD)
+            distance = word_vectors.wmdistance(
+                ref_tokens, pred_tokens
+            )
+            similarity = 1 / (1 + distance)  # Convert to similarity score (range 0 to 1)
+            scores.append(similarity)
+
+        scores = np.array(scores)
+        idx = np.cumsum(lengths)
+
+        scores_grouped = np.split(scores, idx)[:-1]
+        scores_max = [
+            np.max(sample_scores) if len(sample_scores) > 1 else 0
+            for sample_scores in scores_grouped
+        ]
+        out_ds = out_ds.add_column('sms', scores_max)
+
+
+    # uncomment import to compute this
+    if 'moverscore' not in keys:
+        #idf_dict_ref = get_idf_dict(ref_text_flat)
+        #idf_dict_pred = get_idf_dict(pred_text_flat)
+
+        # Compute Mover's Score
+        print(f'computing moverscore ...')
+        start = time.time()
+        # res = word_mover_score(
+        #     ref_text_flat, 
+        #     pred_text_flat, 
+        #     idf_dict_ref, 
+        #     idf_dict_pred,
+        #     stop_words=[], 
+        #     n_gram=1, 
+        #     batch_size=8,
+        # )
+        stop = time.time()
+        print(f'finished computing moverscore in {stop-start:.02f} seconds')
+
+        scores = np.array(res)
+        idx = np.cumsum(lengths)
+
+        scores_grouped = np.split(scores, idx)[:-1]
+        scores_max = [
+            np.max(sample_scores) if len(sample_scores) > 1 else 0
+            for sample_scores in scores_grouped
+        ]
+        out_ds = out_ds.add_column('moverscore', scores_max)
+    if 'bleu' not in keys:
+        critic = evaluate.load('bleu')
+
+        # res = [
+        #     critic.compute(
+        #         predictions=[pred_sample], 
+        #         references=[ref_sample]
+        #     )['bleu']
+        #     for pred_sample, ref_sample 
+        #     in zip(pred_text_flat, ref_text_flat)
+        # ]
+        smooth_fn = SmoothingFunction().method1  # Apply smoothing
+        res = [
+            sentence_bleu(
+                sample_ref, sample_pred, 
+                smoothing_function=smooth_fn
+            )
+            for sample_ref, sample_pred
+            in tqdm(
+                zip(ref_text_flat, pred_text_flat),
+                total=len(ref_text_flat),
+                desc='computing bleu',
+            )
+        ]
+        scores = np.array(res)
+        idx = np.cumsum(lengths)
+
+        scores_grouped = np.split(scores, idx)[:-1]
+        scores_max = [
+            np.max(sample_scores) if len(sample_scores) > 1 else 0
+            for sample_scores in scores_grouped
+        ]
+        out_ds = out_ds.add_column('bleu', scores_max)
+    if 'meteor' not in keys:
+        critic = evaluate.load('meteor')
+
+        res = [
+            critic.compute(
+                predictions=[sample_pred], references=[sample_ref],
+            )['meteor']
+            for sample_ref, sample_pred
+            in tqdm(
+                zip(ref_text_flat, pred_text_flat),
+                total=len(ref_text_flat),
+                desc='computing meteor',
+            )
+        ]
+        scores = np.array(res)
+        idx = np.cumsum(lengths)
+
+        scores_grouped = np.split(scores, idx)[:-1]
+        scores_max = [
+            np.max(sample_scores) if len(sample_scores) > 1 else 0
+            for sample_scores in scores_grouped
+        ]
+        out_ds = out_ds.add_column('meteor', scores_max)
+    if 'chrf' not in keys:
+        critic = evaluate.load('chrf')
+
+        res = [
+            critic.compute(
+                predictions=[sample_pred], references=[sample_ref],
+            )['score']
+            for sample_ref, sample_pred
+            in tqdm(
+                zip(ref_text_flat, pred_text_flat),
+                total=len(ref_text_flat),
+                desc='computing meteor',
+            )
+        ]
+        scores = np.array(res)
+        idx = np.cumsum(lengths)
+
+        scores_grouped = np.split(scores, idx)[:-1]
+        scores_max = [
+            np.max(sample_scores) if len(sample_scores) > 1 else 0
+            for sample_scores in scores_grouped
+        ]
+        out_ds = out_ds.add_column('chrf', scores_max)
+
+    if 'bleurt' not in keys:
+        critic = evaluate.load('bleurt', module_type='metric')
+
+        res = critic.compute(
+            predictions=pred_text_flat, 
+            references=ref_text_flat
+        )
+        scores = np.array(res['scores'])
+        idx = np.cumsum(lengths)
+
+        scores_grouped = np.split(scores, idx)[:-1]
+        scores_max = [
+            np.max(sample_scores) if len(sample_scores) > 1 else 0
+            for sample_scores in scores_grouped
+        ]
+        out_ds = ds.add_column('bleurt', scores_max)
+    if f'{openai_model}-coherence' not in keys:
+        scores = []
+        score_list = []
+        client = OpenAI()
+        for sample_num, (pred, ref) in tqdm(
+            enumerate(zip(pred_text_flat, ref_text_flat)),
+            desc=f'evaluating with {openai_model}',
+            total=len(pred_text_flat),
+        ):
+            prompt = (
+                f"""
+                Prediction: 
+                {pred}
+
+                Reference: 
+                {ref}
+
+                Key Definitions:
+                    Coherence: the collective quality of all sentences. We align this dimension with the DUC quality question (Dang, 2005) of structure and coherence whereby "the summary should be well-structured and well-organized. The summary should not just be a heap of related information, but should build from sentence to sentence to a coherent body of information about a topic." 
+
+                    Consistency: the factual alignment between the summary and the summarized source. A factually consistent summary contains only statements that are entailed by the source document. 
+                    
+                    Fluency: the quality of individual sentences. Sentences in the summary "should have no formatting problems, capitalization errors or obviously ungrammatical sentences (e.g., fragments, missing components) that make the text difficult to read."
+
+                    Relevance: selection of important content from the source. The summary should include only important information from the source document
+
+                Your Task:
+                Based on the given reference text rate the prediction
+                text in terms of coherence, consistency, fluency, and relevance. Your scores should fall anywhere between 
+                1.0 and 5.0, where 1 means the predicted text doesn't meet the criteria at all and 5 means that the predicted text perfectly meets the description of what is being evaluated.
+
+                Give your output in the format:
+                [coherence, consistency, fluency, relevance]
+                """.strip()
+            )
+
+            chat_hist = [{"role": "user", "content": prompt}]
+            valid = False
+            for i in range(3):
+                if i > 0:
+                    reply = (
+                        """
+                        your response did not contain the valid output
+                        Rate the prediction text in terms of coherence, consistency, fluency, and relevance. Your scores should fall in the range [1.0, 5.0], where 1 is the lowest and 5 is the highest.
+
+                        Give your output in the format:
+                        [coherence, consistency, fluency, relevance]
+                        """.strip()
+                    )
+                    chat_hist.append({"role": "user", "content": reply})
+                response = client.chat.completions.create(
+                    model=openai_model,
+                    store=True,
+                    messages=chat_hist,
+                )
+                resp_text = response.choices[0].message.content
+                chat_hist.append({"role": "assistant", "content": resp_text})
+                pattern = r"\[([\d\.\,\s]+)\]"
+
+                match = re.search(pattern, resp_text)
+                sample_scores = []
+                if match:
+                    # Extract the content inside brackets and convert it to a NumPy array
+                    sample_scores = np.array(
+                        [float(num) for num in match.group(1).split(",")]
+                    ).tolist()
+                if len(sample_scores) != 4 or not match:
+                    continue
+                else:
+                    valid = True
+                    break
+            if valid:
+                score_list.append(sample_scores)
+            else:
+                score_list.append([0.0]*4)
+                print(
+                    f'failed to collect scores for sample {sample_num}'
+                )
+
+        coh, con, flu, rel = zip(*score_list)
+
+        score_dict = {
+            f'{openai_model}-coherence': coh,
+            f'{openai_model}-consistency': con,
+            f'{openai_model}-fluency': flu,
+            f'{openai_model}-relevance': rel,
+        }
+        out_ds = ds
+        for col_name, scores in score_dict.items():
+            scores = np.array(scores)
+            idx = np.cumsum(lengths)
+
+            scores_grouped = np.split(scores, idx)[:-1]
+            scores_max = [
+                np.max(sample_scores) if len(sample_scores) > 1 else 0
+                for sample_scores in scores_grouped
+            ]
+            out_ds = out_ds.add_column(col_name, scores_max)
+
+    return out_ds
+
+
+if __name__ == '__main__':
+    parser = ArgumentParser()
+    parser.add_argument(
+        '-o', '--overwrite', action='store_true', default=False,
+        required=False, help='overwrite the output dataset'
+    )
+    args = parser.parse_args()
+    main(args)

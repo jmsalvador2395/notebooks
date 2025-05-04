@@ -204,3 +204,41 @@ def pad_and_stack(
     out_tensors = torch.stack(out_tensors, dim=stack_dim)
 
     return out_tensors
+
+def get_pad_mask(
+        shape: Tuple[int],
+        start_indices: torch.Tensor,
+        device: str='cpu') -> torch.Tensor:
+    """
+    returns a 2d padding tensor of shape `shape`
+
+    Input:
+    - shape: the shape of the padding tensor
+    - start_indices[List[int], ndarray, Tensor]: the list-like object
+      that contains the indices that correspond to where the padding
+      should start
+    - device[int]: the device to store the array
+
+    Output:
+    - torch.Tensor: padding tensor of shape 
+      (len(start_indices), max(start_indices))
+    """
+
+    pad_mask = torch.zeros(
+        shape,
+        dtype=torch.bool,
+        device=device,
+    )
+    if type(start_indices) == list:
+        start_indices = torch.tensor(
+            start_indices, 
+            device=device,
+            dtype=torch.int64,
+        )
+
+    targets = (start_indices >= 0) & (start_indices < shape[-1])
+    pad_mask[targets, start_indices[targets]] = True
+
+    pad_mask = pad_mask.cumsum(axis=-1).to(torch.bool)
+
+    return pad_mask
