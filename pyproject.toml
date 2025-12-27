@@ -1,0 +1,104 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["nbtools"]
+
+[project]
+name = "notebooks"
+version = "2020.0.0"
+dependencies = [
+    "hatchling",
+    "fastapi[standard]",
+    "ipykernel",
+	"ipython",
+	"torch",
+	"transformers",
+	"tokenizers",
+	"numpy",
+	"datasets",
+	"pillow",
+	"matplotlib",
+	"tqdm",
+	"pandas",
+	"scipy",
+	"nltk",
+	"colorama",
+	"ipywidgets",
+	"openpyxl",
+	"py7zr",
+	"pyemd",
+	"tf-keras",
+	"pycocoevalcap",
+	"pot",
+	"pathos",
+]
+requires-python = ">=3.11"
+authors = [
+    {name = "John Salvador", email = "jsalvador95@proton.me"},
+]
+maintainers = [
+    {name = "John Salvador", email = "jsalvador95@proton.me"}
+]
+description = "a collection of jupyter notebooks and scripts for prototyping"
+readme = "README.md"
+license = "MIT"
+#license-files = ["LICEN[CS]E.*"]
+#keywords = []
+classifiers = [
+    "Programming Language :: Python"
+]
+
+[project.optional-dependencies]
+dev = [
+    "black", 
+    "pytest",
+    "ipython",
+]
+
+eval = [
+	"mteb",
+	"umap-learn",
+	"evaluate",
+	"rouge-score",
+	"bert_score",
+	"sacrebleu",
+	"moverscore",
+]
+
+inference = [
+	"langchain",
+	"vllm",
+	"openai",
+]
+
+nlp = [
+	"sentence-transformers",
+	"spacy",
+	"gensim",
+	"accelerate",
+]
+
+all = [
+    "black", 
+    "pytest",
+    "ipython",
+	"mteb",
+	"umap-learn",
+	"evaluate",
+	"rouge-score",
+	"bert_score",
+	"sacrebleu",
+	"moverscore",
+	"langchain",
+	"vllm",
+	"openai",
+	"sentence-transformers",
+	"spacy",
+	"gensim",
+	"accelerate",
+]
+
+[project.urls]
+Repository = "https://github.com/jmsalvador2395/notebooks.git"
